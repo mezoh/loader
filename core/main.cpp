@@ -18,7 +18,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR pCmdLine
 #endif
 
     anti_debug::initialize();
-    // TODO: anti_patch::initialize()
+    anti_patch::initialize();
 
     // render the login UI — auth happens through UI callbacks
     Render::Initialize();
