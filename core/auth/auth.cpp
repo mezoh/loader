@@ -1,9 +1,11 @@
 #include "auth.h"
 
 #include <Windows.h>
+#include <wincrypt.h>
 #include <winhttp.h>
 
 #include <atomic>
+#include <cstring>
 #include <ctime>
 #include <iomanip>
 #include <mutex>
@@ -15,6 +17,7 @@
 #include <core/crypt/skCrypter.h>
 #include <core/auth/hwid/hwid.h>
 
+#pragma comment(lib, "crypt32.lib")
 #pragma comment(lib, "winhttp.lib")
 
 using json = nlohmann::json;
@@ -84,6 +87,10 @@ static std::string make_http_error(DWORD status, const std::string& response)
     return message;
 }
 
+#ifndef DISTORTION_API_LOCAL
+static bool verify_server_cert(HINTERNET request, HMODULE winhttp_mod);
+#endif
+
 static bool http_request(LPCWSTR method, LPCWSTR path, const std::wstring& headers, const std::string& body,
                          std::string& response_out, DWORD& status_out)
 {
@@ -138,6 +145,15 @@ static bool http_request(LPCWSTR method, LPCWSTR path, const std::wstring& heade
         return false;
     }
 
+#ifndef DISTORTION_API_LOCAL
+    if (!verify_server_cert(request, winhttp_mod)) {
+        LI_FN(WinHttpCloseHandle).in(winhttp_mod)(request);
+        LI_FN(WinHttpCloseHandle).in(winhttp_mod)(connection);
+        LI_FN(WinHttpCloseHandle).in(winhttp_mod)(session);
+        return false;
+    }
+#endif
+
     DWORD status = 0;
     DWORD size = sizeof(status);
     LI_FN(WinHttpQueryHeaders)
@@ -177,6 +193,40 @@ static std::wstring auth_json_headers()
 {
     return json_headers() + auth_headers();
 }
+
+#ifndef DISTORTION_API_LOCAL
+static bool verify_server_cert(HINTERNET request, HMODULE winhttp_mod)
+{
+    // SHA-1 thumbprint of distortion.vip certificate. Expires 2026-06-19 20:17:03Z.
+    static const BYTE pinned[20] = {
+        0xD5, 0x4B, 0x64, 0xEB, 0x25, 0x66, 0x5E, 0xF3, 0x69, 0x2F,
+        0x3F, 0xD6, 0x1E, 0x0A, 0x44, 0x72, 0x91, 0xB5, 0xFC, 0xC5,
+    };
+
+    HMODULE crypt32_mod = LI_FN(LoadLibraryW)(_(L"crypt32.dll").decrypt());
+    if (!crypt32_mod) {
+        return false;
+    }
+
+    PCCERT_CONTEXT cert_ctx = nullptr;
+    DWORD size = sizeof(cert_ctx);
+    if (!LI_FN(WinHttpQueryOption).in(winhttp_mod)(
+            request, WINHTTP_OPTION_SERVER_CERT_CONTEXT, &cert_ctx, &size)) {
+        return false;
+    }
+
+    BYTE hash[20] = {};
+    DWORD hash_size = sizeof(hash);
+    BOOL ok = LI_FN(CertGetCertificateContextProperty)
+                  .in(crypt32_mod)(cert_ctx, CERT_SHA1_HASH_PROP_ID, hash, &hash_size);
+    LI_FN(CertFreeCertificateContext).in(crypt32_mod)(cert_ctx);
+
+    if (!ok || hash_size != sizeof(hash)) {
+        return false;
+    }
+    return std::memcmp(hash, pinned, sizeof(pinned)) == 0;
+}
+#endif
 
 static bool parse_json_response(const std::string& response, json& parsed)
 {
